@@ -1,0 +1,28 @@
+[package]
+name = "crabbian-watcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kand = "0.2.2"
+rmcp = { version = "3.5.0", features = ["server", "macros", "transport-streamable-http-server"] }
+axum = "0.8"
+schemars = "1"
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal", "net", "sync"] }
+memory-stats = "1"
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+binance-sdk = { version = "73.0.0", features = ["spot", "derivatives_trading_usds_futures"] }
+dotenvy = "0.15"

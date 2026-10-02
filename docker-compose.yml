@@ -1,0 +1,38 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  crabbian-watcher:
+    container_name: crabbian-watcher
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crabbian-watcher:latest
+    restart: unless-stopped
+    networks:
+      - alpha_network
+    env_file:
+      - .env
+    logging: *default-logging
+    environment:
+      CRABBIAN_API_KEY: ${CRABBIAN_API_KEY:?set CRABBIAN_API_KEY in .env}
+      CRABBIAN_BIND: 0.0.0.0:8080
+      BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://fstream.binance.com/market/stream}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_PROCESS: ${LOG_PROCESS:-crabbian}
+    expose:
+      - "8080"
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  alpha_network:
+    external: true

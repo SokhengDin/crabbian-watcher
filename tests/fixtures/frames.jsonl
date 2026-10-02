@@ -1,0 +1,9 @@
+{"result":null,"id":1}
+{"stream":"solusdt@aggTrade","data":{"e":"aggTrade","E":1790000000105,"s":"SOLUSDT","a":900001,"p":"150.120","q":"12.5","nq":"12.5","f":1200001,"l":1200003,"T":1790000000100,"m":false}}
+{"stream":"solusdt@aggTrade","data":{"e":"aggTrade","E":1790000000405,"s":"SOLUSDT","a":900002,"p":"150.110","q":"3.0","nq":"3.0","f":1200004,"l":1200004,"T":1790000000400,"m":true}}
+{"stream":"solusdt@aggTrade","data":{"e":"aggTrade","E":1790000000405,"s":"SOLUSDT","a":900002,"p":"150.110","q":"3.0","nq":"3.0","f":1200004,"l":1200004,"T":1790000000400,"m":true}}
+{"stream":"solusdt@markPrice@1s","data":{"e":"markPriceUpdate","E":1790000001000,"s":"SOLUSDT","p":"150.11500000","ap":"150.10000000","P":"150.20000000","i":"150.13000000","r":"0.00012500","T":1790006400000}}
+{"stream":"!forceOrder@arr","data":{"e":"forceOrder","E":1790000001200,"o":{"s":"SOLUSDT","S":"SELL","o":"LIMIT","f":"IOC","q":"400","p":"149.80","ap":"149.90","X":"FILLED","l":"400","z":"400","T":1790000001190}}}
+{"stream":"btcusdt@depth","data":{"e":"depthUpdate"}}
+{"error":{"code":2,"msg":"Invalid request: too many parameters"},"id":7}
+not json

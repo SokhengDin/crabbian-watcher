@@ -1,0 +1,104 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crabbian_watcher::detector::Dir;
+use crabbian_watcher::events::{Event, EventBus, EventKind, RING_CAP, Signals};
+
+fn ev() -> Event {
+    Event {
+        seq: 0,
+        epoch: String::new(),
+        ts: String::new(),
+        symbol: "SOLUSDT".into(),
+        tier: 1,
+        kind: EventKind::Jump,
+        direction: Dir::Up,
+        signals: Signals::default(),
+        levels_hit: Vec::new(),
+        rule: None,
+    }
+}
+
+const NOW: u64 = 1_790_000_000_000;
+
+#[tokio::test]
+async fn returns_at_once_when_newer_events_exist() {
+    let bus = EventBus::new("e1");
+    for _ in 0..3 {
+        bus.push(ev(), NOW);
+    }
+    let r = bus.wait(1, Some("e1"), Duration::from_secs(5)).await;
+    assert_eq!((r.next, r.dropped, r.events.len()), (3, 0, 2));
+    assert_eq!(
+        r.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(
+        (r.events[0].epoch.as_str(), r.events[0].ts.as_str()),
+        ("e1", "2026-09-21T14:13:20.000Z")
+    );
+}
+
+#[tokio::test]
+async fn times_out_with_the_same_cursor() {
+    let bus = EventBus::new("e1");
+    bus.push(ev(), NOW);
+    let t = Instant::now();
+    let r = bus.wait(1, Some("e1"), Duration::from_millis(150)).await;
+    assert!(t.elapsed() >= Duration::from_millis(140));
+    assert_eq!(
+        (r.epoch.as_str(), r.next, r.dropped, r.events.len()),
+        ("e1", 1, 0, 0)
+    );
+}
+
+#[tokio::test]
+async fn wakes_on_push() {
+    let bus = Arc::new(EventBus::new("e1"));
+    let b = bus.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        b.push(ev(), NOW);
+    });
+    let t = Instant::now();
+    let r = bus.wait(0, Some("e1"), Duration::from_secs(10)).await;
+    assert!(t.elapsed() < Duration::from_secs(2));
+    assert_eq!((r.next, r.events.len()), (1, 1));
+}
+
+#[tokio::test]
+async fn epoch_change_returns_the_whole_ring() {
+    let bus = EventBus::new("new");
+    let r = bus.wait(77, None, Duration::from_secs(5)).await;
+    assert_eq!(
+        (r.epoch.as_str(), r.next, r.dropped, r.events.len()),
+        ("new", 0, 0, 0),
+        "empty ring still returns at once"
+    );
+    bus.push(ev(), NOW);
+    bus.push(ev(), NOW);
+    let r = bus.wait(500, Some("old"), Duration::from_secs(5)).await;
+    assert_eq!(
+        (r.epoch.as_str(), r.next, r.dropped, r.events.len()),
+        ("new", 2, 0, 2)
+    );
+}
+
+#[tokio::test]
+async fn reports_dropped_when_cursor_fell_out_of_the_ring() {
+    let bus = EventBus::new("e1");
+    for _ in 0..RING_CAP + 5 {
+        bus.push(ev(), NOW);
+    }
+    let r = bus.wait(0, Some("e1"), Duration::from_secs(5)).await;
+    assert_eq!(
+        (r.dropped, r.events.len(), r.events[0].seq),
+        (5, RING_CAP, 6)
+    );
+    assert_eq!(r.next, (RING_CAP + 5) as u64);
+    let r = bus
+        .wait(r.next - 1, Some("e1"), Duration::from_secs(5))
+        .await;
+    assert_eq!((r.dropped, r.events.len()), (0, 1));
+    assert_eq!(bus.stats().total, (RING_CAP + 5) as u64);
+}
