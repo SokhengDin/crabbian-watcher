@@ -111,7 +111,7 @@ Windows are 1, 5 and 15 minutes built from the 1s bars. Every move is measured a
 - **OI reads the move:** price up + OI up = new longs; price down + OI up = shorts building; price moves + OI down =
   closing/squeeze, more likely to retrace. Attach the reading to the event; do not gate on it.
 - **Cooldown:** 15 minutes per symbol and direction. **Hysteresis:** re-arm when `\|z\|` < 1.5; a re-fire inside the
-  cooldown needs the move to extend 1.5x past the last event. **Warm-up:** no events for 30 minutes after start or a
+  cooldown needs the move to extend 1.5x past the last event. **Warm-up:** no events for 15 minutes after start or a
   reconnect gap > 60s (baselines rebuilt from REST klines first).
 - ATR for the level-proximity test is ATR(14) on 1m bars; `kand` is allowed for that and nothing else. EWMA, z-score and
   medians are hand-written.
@@ -122,7 +122,7 @@ Windows are 1, 5 and 15 minutes built from the 1s bars. Every move is measured a
 |---|---|---|---|
 | 0 | Protect | price reaches an open trade's SL, TP or liquidation level | run `_enforce_protection` for that trade now |
 | 1 | Heads up | primary + one confirmer | flash alert via `post_to_desk` (also lands in the desk timeline so every agent sees it); no agent run |
-| 2 | Please check | any of: `\|z\|` >= 6 on any window; two or more confirmers; touches a level of an open trade or an agent rule | everything in Tier 1 + a watcher-agent run with the trigger in its prompt |
+| 2 | Please check | any of: `\|z\|` >= 6 on any window; confirmers from two or more independent families (volume + taker imbalance count once); touches a level of an open trade or an agent rule | everything in Tier 1 + a watcher-agent run with the trigger in its prompt |
 
 Tier 2 implies Tier 1; `levels_hit` with SL/TP/liquidation additionally implies Tier 0. The "very high" line (z >= 6, two
 confirmers) is a first guess; Phase A tunes it.
@@ -139,9 +139,10 @@ Typed data in a closed condition list. Never code, never a free-form expression 
   "note": "Thesis: a reclaim of 150 on volume invalidates the short",
   "plan": { "side": "long", "sl": 146.0, "tp": 158.0 },
   "ttl_s": 86400, "once": true,
-  "owner": { "user_id": 42, "agent": "supervisor" } }
+  "owner": { "user_id": "0b6c1f7e-2d3a-4c5b-9e8f-7a6b5c4d3e2f", "agent": "supervisor" } }
 ```
 
+- Ids from the bot are UUID strings (`owner.user_id`, `trade_id`), not integers.
 - Conditions: `price_cross`, `move_z`, `volume_x`, `taker_imbalance`, `liq_burst`, `oi_change_z`, `funding_above`; combined
   with `all` only. Adding a condition type means adding Rust code and a test, never a config entry.
 - `action`: `notify` (Tier 1 behavior) or `wake` (Tier 2). No action opens a trade.
@@ -181,8 +182,8 @@ LLM-facing and required.
 { "seq": 1042, "epoch": "b7c1", "ts": "2026-10-02T14:03:07.412Z", "symbol": "SOLUSDT",
   "tier": 2, "kind": "jump", "direction": "down",
   "signals": { "z5": -4.6, "move_pct": -2.3, "vol_x": 5.2, "taker_sell": 0.78, "liq_usd": 3100000, "oi_read": "shorts_building" },
-  "levels_hit": [ { "kind": "sl", "trade_id": 812, "price": 141.2 } ],
-  "rule": { "rule_id": "r_91", "owner": { "user_id": 42, "agent": "supervisor" }, "note": "...", "plan": { "side": "long", "sl": 146.0, "tp": 158.0 } } }
+  "levels_hit": [ { "kind": "sl", "trade_id": "6f1a2b3c-5d4e-4f60-8a7b-9c0d1e2f3a4b", "price": 141.2 } ],
+  "rule": { "rule_id": "a1b2c3d4e5f6", "owner": { "user_id": "0b6c1f7e-2d3a-4c5b-9e8f-7a6b5c4d3e2f", "agent": "supervisor" }, "note": "...", "plan": { "side": "long", "sl": 146.0, "tp": 158.0 } } }
 ```
 
 `kind` is `jump | level | liq | oi | rule`. `levels_hit` and `rule` are omitted when empty.

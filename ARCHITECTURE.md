@@ -200,7 +200,9 @@ candidate.
 
 A signal never confirms itself.
 
-**Market tier:** 2 if any window has \|z\| ≥ 6 or there are at least 2 confirmers, otherwise 1.
+**Market tier:** 2 if any window has \|z\| ≥ 6 or the confirmers come from at least 2 independent families, otherwise
+1. Volume surge and taker imbalance are one family (flow), because a one-sided surge usually shows both; liquidations
+and OI shock each count as their own.
 
 **OI reading:** attached to the event when \|oi_z\| ≥ 1, and never used to gate. The four readings are:
 
@@ -224,12 +226,12 @@ liquidation and OI kinds.
   last event price. The move is measured from a reference that stays fixed for the whole cooldown episode. Example:
   the first event at +0.4% (from reference R) allows the next at +1.0%, then +2.5%. A steady 2% run therefore produces
   two events, not five.
-- **Warm-up:** for 30 minutes after a symbol is added, and again after a feed gap longer than 60s:
+- **Warm-up:** for 15 minutes (the longest window) after a symbol is added, and again after a feed gap longer than 60s:
   - No jump, liquidation or OI events.
   - Rule conditions that need baselines (`move_z`, `volume_x`, `taker_imbalance`, `liq_burst`, `oi_change_z`)
     evaluate false.
   - **Level touches and `price_cross` / `funding_above` conditions still fire.** Stop-loss protection must not go
-    blind for 30 minutes after a restart.
+    blind for 15 minutes after a restart.
 
 ## 8. Levels
 
@@ -349,8 +351,8 @@ This is the contract the bot's pump depends on. Code: `src/events.rs`.
   "signals": { "price": 141.18, "z1": -6.1, "z5": -4.6, "z15": -2.9, "window_s": 60, "move_pct": -2.3,
                "vol_x": 5.2, "taker_buy": 0.22, "taker_sell": 0.78, "liq_usd": 3100000, "liq_x": 4.1,
                "oi_z": 1.8, "oi_read": "shorts_building", "funding": 0.0001, "confirmers": ["volume", "taker", "liq"] },
-  "levels_hit": [ { "kind": "sl", "trade_id": 812, "side": "long", "price": 141.2, "touch": "cross", "direction": "down" } ],
-  "rule": { "rule_id": "r_91", "owner": { "user_id": 42, "agent": "supervisor" }, "note": "...", "action": "wake",
+  "levels_hit": [ { "kind": "sl", "trade_id": "6f1a2b3c-5d4e-4f60-8a7b-9c0d1e2f3a4b", "side": "long", "price": 141.2, "touch": "cross", "direction": "down" } ],
+  "rule": { "rule_id": "a1b2c3d4e5f6", "owner": { "user_id": "0b6c1f7e-2d3a-4c5b-9e8f-7a6b5c4d3e2f", "agent": "supervisor" }, "note": "...", "action": "wake",
             "plan": { "side": "long", "entry": null, "sl": 146.0, "tp": 158.0 }, "parent_seq": 1001 } }
 ```
 
@@ -386,7 +388,7 @@ This is the contract the bot's pump depends on. Code: `src/events.rs`.
 | `openInterest` | every 30s per subscribed symbol | live OI change |
 
 The REST task is sequential, which keeps request weight low. Adding 30 symbols at once takes on the order of a minute
-to backfill, which is well inside the 30-minute warm-up.
+to backfill, which is well inside the 15-minute warm-up.
 
 ## 13. Failure behavior
 
@@ -394,7 +396,7 @@ to backfill, which is well inside the 30-minute warm-up.
 |---|---|
 | Socket drops or errors | reconnect with backoff from 1s doubling to 30s, resubscribe the full set, broadcast the gap to shards, and backfill 1m klines from the last message. A gap over 60s restarts warm-up for every symbol |
 | No message for 5s while subscribed | treated as dead and reconnected. `feed_age_ms` and `feed_down_s` show it; the bot treats more than 60s as "fast protection is blind" |
-| Process restart | new epoch, empty rings refilled from REST, 30-minute warm-up for market events. Levels and `price_cross` rules protect again as soon as the bot re-syncs |
+| Process restart | new epoch, empty rings refilled from REST, 15-minute warm-up for market events. Levels and `price_cross` rules protect again as soon as the bot re-syncs |
 | Bot or pump down | events wait in the ring; past 1,000 the oldest drop and `dropped` reports it |
 | Shard channel full | the tick is dropped and counted (`dropped_ticks`); the socket reader never blocks |
 | Unknown symbol in `set_interest` | listed in `unknown`; the rest are applied |
@@ -428,7 +430,7 @@ Thresholds are **not** configuration. They are `const`s in `src/detector/consts.
 | `OI_SHOCK_Z`, `OI_READ_Z`, `OI_MIN_SAMPLES` | 3.0, 1.0, 288 | open interest |
 | `LEVEL_NEAR_ATR`, `LEVEL_REARM_ATR`, `ATR_PERIOD` | 0.25, 0.5, 14 | levels |
 | `COOLDOWN_MS`, `REARM_Z`, `EXTEND_X` | 15 min, 1.5, 1.5 | gate |
-| `WARMUP_MS`, `GAP_REWARM_MS` | 30 min, 60 s | warm-up |
+| `WARMUP_MS`, `GAP_REWARM_MS` | 15 min, 60 s | warm-up |
 | `BARS_1S`, `BARS_1M`, `BACKFILL_1M` | 1,800, 10,080, 1,500 | ring sizes and backfill |
 
 Change values only in `consts.rs`, and pin the new behavior with a test.
@@ -495,7 +497,7 @@ These settle points the plan left open or describe differently. Each was chosen 
    instead would re-fire geometrically along a single steady move (0.4%, 0.6%, 0.9%, 1.35% …).
 2. **Tier 0 is implied, not a value.** `tier` is 1 or 2. Protection is signaled by an sl/tp/liquidation entry in
    `levels_hit` with `touch: cross`. This matches the example event in CLAUDE.md (tier 2 with an sl hit).
-3. **Levels and price-only rules ignore warm-up.** Market events wait 30 minutes; protection does not.
+3. **Levels and price-only rules ignore warm-up.** Market events wait 15 minutes; protection does not.
 4. **`touch` and `direction` on level hits.** These separate an approach from an actual cross, so the bot protects
    only on `cross`.
 5. **Idempotent `create_rule` by caller-chosen `rule_id`, with tombstones**, so the 60-second sync can resend every
@@ -507,6 +509,16 @@ These settle points the plan left open or describe differently. Each was chosen 
 9. **Per-trade trip prices** give millisecond reaction while keeping heavy math to once per second.
 10. **`/market` route.** Required since Binance's route split; the spike's spot URL and the unrouted futures URL no
     longer carry these streams.
+
+11. **Ids are strings.** `owner.user_id`, `cancel_rule.user_id` and `Level.trade_id` are UUID strings, because that is what
+    the bot's users and trades use. They were `i64` in the first build.
+12. **Warm-up is 15 minutes, not 30.** The REST backfill already supplies a day of baselines, and the longest window needs
+    15 minutes of live 1s bars anyway, so a longer blind period only cost events.
+13. **Tier 2 counts independent families.** Volume surge and taker imbalance are one flow family, so a one-sided surge no
+    longer reaches tier 2 on those two alone. Pinned by `detector::signals::tests`.
+14. **Rule event direction comes from the rule.** `When::direction` reads the first `price_cross`, directional `move_z` /
+    `oi_change_z`, or `taker_imbalance` side; the 5-minute move is only the fallback. A down-cross rule fired in the first
+    minutes after a start is no longer labelled "up".
 
 ## 18. Open items
 

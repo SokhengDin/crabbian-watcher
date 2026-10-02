@@ -23,8 +23,8 @@ services:
       BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://fstream.binance.com/market/stream}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_PROCESS: ${LOG_PROCESS:-crabbian}
-    expose:
-      - "8080"
+    ports:
+      - "127.0.0.1:${CRABBIAN_HOST_PORT:-8080}:8080"
     stop_grace_period: 10s
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
