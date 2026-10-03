@@ -385,7 +385,7 @@ This is the contract the bot's pump depends on. Code: `src/events.rs`.
 
 | Call | When | Use |
 |---|---|---|
-| `exchangeInfo` | at start, then hourly | known symbols: `PERPETUAL`, quote `USDT`, status `TRADING` |
+| `exchangeInfo` | at start, then hourly | known symbols: any contract type ending in `PERPETUAL` (`PERPETUAL`, `TRADIFI_PERPETUAL` for gold, silver and stock perps, and future ones), quote `USDT`, status `TRADING`; kept and dropped counts per contract type are logged |
 | `klines` 1m | when a symbol is added (last 1,500 minutes, pages of 1,000, continuing from the last candle received); after a reconnect (from the last message minus 2 min) | 1m ring, σ, medians, ATR |
 | `openInterestHist` 5m | when a symbol is added (7 days, pages of 500) | OI baseline available immediately, instead of after a week |
 | `openInterest` | every 30s per subscribed symbol | live OI change |

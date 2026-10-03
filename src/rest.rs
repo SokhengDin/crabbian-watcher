@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use binance_sdk::config::ConfigurationRestApi;
@@ -60,6 +60,16 @@ fn int(v: Option<&KlineCandlestickDataItemInner>) -> Option<u64> {
     }
 }
 
+pub fn is_perpetual(
+    contract_type: Option<&str>,
+    quote: Option<&str>,
+    status: Option<&str>,
+) -> bool {
+    contract_type.is_some_and(|t| t.ends_with("PERPETUAL"))
+        && quote == Some("USDT")
+        && status == Some("TRADING")
+}
+
 pub fn kline_bar(k: &[KlineCandlestickDataItemInner]) -> Option<Bar> {
     Some(Bar {
         t: int(k.first())?,
@@ -95,17 +105,23 @@ impl Rest {
             .data()
             .await
             .map_err(req)?;
-        Ok(info
-            .symbols
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| {
-                s.contract_type.as_deref() == Some("PERPETUAL")
-                    && s.quote_asset.as_deref() == Some("USDT")
-                    && s.status.as_deref() == Some("TRADING")
-            })
-            .filter_map(|s| s.symbol)
-            .collect())
+        let mut kept = HashSet::new();
+        let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
+        for s in info.symbols.unwrap_or_default() {
+            let kind = s.contract_type.as_deref();
+            if is_perpetual(kind, s.quote_asset.as_deref(), s.status.as_deref()) {
+                kept.extend(s.symbol);
+            } else {
+                let reason = match kind {
+                    Some(k) if k.ends_with("PERPETUAL") => "perpetual not USDT or not trading",
+                    Some(k) => k,
+                    None => "no contract type",
+                };
+                *dropped.entry(reason.to_string()).or_default() += 1;
+            }
+        }
+        tracing::info!(kept = kept.len(), ?dropped, "exchange symbols filtered");
+        Ok(kept)
     }
 
     pub async fn klines_1m(
@@ -280,5 +296,28 @@ pub async fn run(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_usdt_perpetual_kind_counts_and_dated_futures_do_not() {
+        let ok = |t: &str| is_perpetual(Some(t), Some("USDT"), Some("TRADING"));
+        assert!(ok("PERPETUAL") && ok("TRADIFI_PERPETUAL") && ok("FUTURE_PERPETUAL"));
+        assert!(!ok("CURRENT_QUARTER") && !ok("NEXT_QUARTER"));
+        assert!(!is_perpetual(
+            Some("PERPETUAL"),
+            Some("USDC"),
+            Some("TRADING")
+        ));
+        assert!(!is_perpetual(
+            Some("PERPETUAL"),
+            Some("USDT"),
+            Some("SETTLING")
+        ));
+        assert!(!is_perpetual(None, Some("USDT"), Some("TRADING")));
     }
 }
