@@ -53,7 +53,6 @@ pub struct Signals {
     pub oi_read: Option<OiRead>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub funding: Option<f64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub confirmers: Vec<Confirmer>,
 }
 
@@ -82,7 +81,6 @@ pub struct Event {
     pub kind: EventKind,
     pub direction: Dir,
     pub signals: Signals,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub levels_hit: Vec<LevelHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<RuleRef>,

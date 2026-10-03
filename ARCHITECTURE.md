@@ -357,8 +357,11 @@ This is the contract the bot's pump depends on. Code: `src/events.rs`.
 ```
 
 - `kind` is one of `jump | level | liq | oi | rule`.
-- Every `signals` field except `price` is omitted when it doesn't apply. `levels_hit` and `rule` are omitted when
-  empty.
+- Optional `signals` fields are omitted when they don't apply, and `rule` is omitted when there is none. `levels_hit` and
+  `signals.confirmers` are always present (an empty array when empty): the advertised output schema marks them required,
+  and the bot's MCP client validates every reply against that schema and rejects the whole batch otherwise. Any new
+  `Vec` field on an output type must follow the same rule; `a_serialized_event_carries_every_property_its_schema_requires`
+  guards it.
 - Each event is also logged as one JSON line with `seq`, `symbol`, `tier`, `kind`, `direction`, `z5`, `move_pct`,
   `levels` and `rule`.
 

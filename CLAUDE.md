@@ -186,7 +186,9 @@ LLM-facing and required.
   "rule": { "rule_id": "a1b2c3d4e5f6", "owner": { "user_id": "0b6c1f7e-2d3a-4c5b-9e8f-7a6b5c4d3e2f", "agent": "supervisor" }, "note": "...", "plan": { "side": "long", "sl": 146.0, "tp": 158.0 } } }
 ```
 
-`kind` is `jump | level | liq | oi | rule`. `levels_hit` and `rule` are omitted when empty.
+`kind` is `jump | level | liq | oi | rule`. `rule` is omitted when absent; `levels_hit` and `signals.confirmers` are always
+present (empty arrays), because the bot's MCP client validates replies against the advertised schema, which marks them
+required. Never `skip_serializing_if` a `Vec` on an output type.
 
 ## Binance specifics (verify against current docs before relying on any of this)
 

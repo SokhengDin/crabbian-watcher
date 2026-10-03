@@ -102,3 +102,24 @@ async fn reports_dropped_when_cursor_fell_out_of_the_ring() {
     assert_eq!((r.dropped, r.events.len()), (0, 1));
     assert_eq!(bus.stats().total, (RING_CAP + 5) as u64);
 }
+
+#[test]
+fn a_serialized_event_carries_every_property_its_schema_requires() {
+    let schema = serde_json::to_value(schemars::schema_for!(Event)).unwrap();
+    let json = serde_json::to_value(ev()).unwrap();
+    let missing = |required: &serde_json::Value, obj: &serde_json::Value| -> Vec<String> {
+        required
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| k.as_str())
+            .filter(|k| obj.get(*k).is_none())
+            .map(String::from)
+            .collect()
+    };
+    assert_eq!(missing(&schema["required"], &json), Vec::<String>::new());
+    assert_eq!(
+        missing(&schema["$defs"]["Signals"]["required"], &json["signals"]),
+        Vec::<String>::new()
+    );
+}
