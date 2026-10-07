@@ -5,6 +5,22 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
+  crabbian-redis:
+    container_name: crabbian-redis
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    restart: unless-stopped
+    networks:
+      - alpha_network
+    logging: *default-logging
+    volumes:
+      - crabbian_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   crabbian-watcher:
     container_name: crabbian-watcher
     build:
@@ -12,6 +28,9 @@ services:
       dockerfile: Dockerfile
     image: crabbian-watcher:latest
     restart: unless-stopped
+    depends_on:
+      crabbian-redis:
+        condition: service_healthy
     networks:
       - alpha_network
     env_file:
@@ -23,7 +42,7 @@ services:
       BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://fstream.binance.com/market/stream}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_PROCESS: ${LOG_PROCESS:-crabbian}
-      REDIS_URL: ${REDIS_URL:-redis://bg-agent-bot-redis:6379/0}
+      REDIS_URL: ${REDIS_URL:-redis://crabbian-redis:6379/0}
       CRABBIAN_CALLBACK_URL: ${CRABBIAN_CALLBACK_URL:-http://bg-agent-bot-app:8090/crabbian/events}
     ports:
       - "127.0.0.1:${CRABBIAN_HOST_PORT:-8080}:8080"
@@ -34,6 +53,9 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+
+volumes:
+  crabbian_redis_data:
 
 networks:
   alpha_network:
