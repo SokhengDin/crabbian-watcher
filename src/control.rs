@@ -510,7 +510,6 @@ pub async fn run(
                     let _ = tx.send(mine && c.drop_rule(&id, "cancelled"));
                 }
                 Cmd::Known(set) => {
-                    tracing::info!(symbols = set.len(), "exchange symbols loaded");
                     c.known = set;
                 }
                 Cmd::Status(tx) => {

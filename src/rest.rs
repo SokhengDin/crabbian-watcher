@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use binance_sdk::config::ConfigurationRestApi;
@@ -106,21 +106,15 @@ impl Rest {
             .await
             .map_err(req)?;
         let mut kept = HashSet::new();
-        let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
         for s in info.symbols.unwrap_or_default() {
-            let kind = s.contract_type.as_deref();
-            if is_perpetual(kind, s.quote_asset.as_deref(), s.status.as_deref()) {
+            if is_perpetual(
+                s.contract_type.as_deref(),
+                s.quote_asset.as_deref(),
+                s.status.as_deref(),
+            ) {
                 kept.extend(s.symbol);
-            } else {
-                let reason = match kind {
-                    Some(k) if k.ends_with("PERPETUAL") => "perpetual not USDT or not trading",
-                    Some(k) => k,
-                    None => "no contract type",
-                };
-                *dropped.entry(reason.to_string()).or_default() += 1;
             }
         }
-        tracing::info!(kept = kept.len(), ?dropped, "exchange symbols filtered");
         Ok(kept)
     }
 
