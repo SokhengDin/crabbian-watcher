@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crabbian_watcher::detector::Dir;
 use crabbian_watcher::events::{Event, EventBus, EventKind, RING_CAP, Signals};
+use crabbian_watcher::levels::{LevelHit, LevelKind, Touch};
 
 fn ev() -> Event {
     Event {
@@ -122,4 +123,58 @@ fn a_serialized_event_carries_every_property_its_schema_requires() {
         missing(&schema["$defs"]["Signals"]["required"], &json["signals"]),
         Vec::<String>::new()
     );
+}
+
+fn hit(kind: LevelKind) -> LevelHit {
+    LevelHit {
+        kind,
+        trade_id: None,
+        side: None,
+        price: 150.0,
+        touch: Touch::Near,
+        direction: Dir::Up,
+    }
+}
+
+#[test]
+fn weak_heads_ups_on_thesis_levels_and_small_liquidations_are_skipped() {
+    let liq = |z1: f64| Event {
+        kind: EventKind::Liq,
+        signals: Signals {
+            window_s: Some(60),
+            z1: Some(z1),
+            ..Default::default()
+        },
+        ..ev()
+    };
+    assert!(liq(-2.4).weak());
+    assert!(!liq(-3.2).weak());
+    assert!(
+        !Event {
+            tier: 2,
+            ..liq(-2.4)
+        }
+        .weak()
+    );
+
+    let level = |vol_x: Option<f64>, kind: LevelKind| Event {
+        kind: EventKind::Level,
+        signals: Signals {
+            vol_x,
+            ..Default::default()
+        },
+        levels_hit: vec![hit(kind)],
+        ..ev()
+    };
+    assert!(level(Some(0.6), LevelKind::Thesis).weak());
+    assert!(!level(Some(1.4), LevelKind::Thesis).weak());
+    assert!(
+        !level(None, LevelKind::Thesis).weak(),
+        "missing volume is never dropped"
+    );
+    assert!(
+        !level(Some(0.6), LevelKind::Sl).weak(),
+        "trade levels always go out"
+    );
+    assert!(!ev().weak());
 }

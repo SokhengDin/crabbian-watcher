@@ -15,7 +15,7 @@ use crabbian_watcher::events::EventBus;
 use crabbian_watcher::ingest::FeedStats;
 use crabbian_watcher::mcp::{self, Watcher};
 use crabbian_watcher::rest::Rest;
-use crabbian_watcher::{control, ingest, rest, shard};
+use crabbian_watcher::{callback, control, ingest, rest, shard, store};
 
 async fn shutdown_signal() {
     #[cfg(unix)]
@@ -54,6 +54,33 @@ async fn main() -> anyhow::Result<()> {
     let (fired_tx, fired_rx) = mpsc::unbounded_channel();
     let (rest_tx, rest_rx) = mpsc::unbounded_channel();
 
+    let (persist_tx, saved) = match &cfg.redis_url {
+        Some(url) => {
+            let mut con = store::connect(url).await?;
+            let saved = store::load(&mut con).await?;
+            let (tx, rx) = mpsc::unbounded_channel();
+            tokio::spawn(store::run_writer(con, rx, ct.child_token()));
+            (Some(tx), saved)
+        }
+        None => {
+            tracing::warn!("REDIS_URL not set: interest, levels and rules are memory only");
+            (None, Default::default())
+        }
+    };
+    match &cfg.callback_url {
+        Some(url) => {
+            tokio::spawn(callback::run(
+                bus.clone(),
+                url.clone(),
+                cfg.api_key.clone(),
+                ct.child_token(),
+            ));
+        }
+        None => tracing::warn!(
+            "CRABBIAN_CALLBACK_URL not set: events stay in the ring for wait_events only"
+        ),
+    }
+
     for io in shard_io {
         tokio::spawn(shard::run(
             io,
@@ -68,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         router.clone(),
         want_tx,
         rest_tx.clone(),
+        (persist_tx, saved),
         ct.child_token(),
     ));
     tokio::spawn(rest::run(
@@ -113,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(mcp);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
-    tracing::info!(process = %cfg.log_process, bind = %cfg.bind, binance_ws = %cfg.binance_ws_url, epoch = %epoch, "started");
+    tracing::info!(process = %cfg.log_process, bind = %cfg.bind, binance_ws = %cfg.binance_ws_url, epoch = %epoch, redis = cfg.redis_url.is_some(), callback = cfg.callback_url.is_some(), "started");
 
     axum::serve(listener, app)
         .with_graceful_shutdown({

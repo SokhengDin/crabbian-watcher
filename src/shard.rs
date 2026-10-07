@@ -12,6 +12,7 @@ use crate::detector::{
     Bar, Candidate, Dir, Gate, Kind, Metrics, SymbolState, detect, measure, oi_read,
 };
 use crate::events::{Event, EventBus, EventKind, RuleRef, Signals, iso_ms};
+use crate::formula;
 use crate::levels::{self, Level, LevelHit, LevelWatch};
 use crate::rules::{Action, RuleEntry, RuleRt};
 
@@ -337,15 +338,20 @@ impl SymbolCtx {
         };
         self.gate.observe(&m);
         let mut hits: Vec<LevelHit> = Vec::new();
-        levels::check(&mut self.levels, m.price, self.st.atr(), &mut hits);
+        levels::check(&mut self.levels, m.price, self.st.atr(), now_ms, &mut hits);
         let cand = if m.warm {
             detect(&m).filter(|c| self.gate.allow(c.dir, now_ms, m.price))
         } else {
             None
         };
         let mut fired: Vec<(RuleRef, Option<Dir>)> = Vec::new();
+        let ctx = self
+            .rules
+            .iter()
+            .any(RuleRt::has_formula)
+            .then(|| formula::context(&m));
         for r in self.rules.iter_mut() {
-            if r.eval(&m) {
+            if r.eval(&m, ctx.as_ref()) {
                 let s = &r.entry.spec;
                 fired.push((
                     RuleRef {
@@ -467,7 +473,11 @@ pub async fn run(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let emit = |ctx: &mut SymbolCtx, events: Vec<Event>, now: u64| {
         for e in events {
-            bus.push(e, now);
+            if e.weak() {
+                tracing::debug!(symbol = %e.symbol, kind = ?e.kind, "weak event skipped");
+            } else {
+                bus.push(e, now);
+            }
         }
         for id in ctx.fired_once.drain(..) {
             let _ = fired.send(id);

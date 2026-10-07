@@ -17,11 +17,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::control::{Cmd, CreateResult, InterestResult, LevelsResult, RuleView};
+use crate::control::{Cmd, CreateResult, InterestResult, LevelsResult, RuleFilter, RuleView};
 use crate::events::{EventBus, WaitResult};
+use crate::formula;
 use crate::ingest::FeedStats;
 use crate::levels::Level;
-use crate::rules::{Owner, RuleSpec};
+use crate::rules::RuleSpec;
 use crate::shard::{Router, SymbolSnapshot, now_ms};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -41,9 +42,42 @@ pub struct SetLevelsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateInterestArgs {
+    #[schemars(description = "USDT perpetual symbols to start watching, e.g. [\"SOLUSDT\"]")]
+    pub add: Vec<String>,
+    #[schemars(description = "Symbols to stop watching")]
+    pub remove: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PutLevelsArgs {
+    #[schemars(
+        description = "Name of this group of levels, e.g. trade:<trade_id> for an open trade's sl/tp/liquidation. Re-sending a key replaces that group only"
+    )]
+    pub key: String,
+    #[schemars(description = "Levels of the group; an empty list removes the group")]
+    pub levels: Vec<Level>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemoveLevelsArgs {
+    #[schemars(description = "Key given to put_levels")]
+    pub key: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RemovedResult {
+    pub removed: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListRulesArgs {
-    #[schemars(description = "Owner whose active rules to list")]
-    pub owner: Owner,
+    #[schemars(description = "Desk user id (UUID string) whose active rules to list")]
+    pub user_id: String,
+    #[schemars(description = "Only rules created by this agent; omit for every agent of the user")]
+    pub agent: Option<String>,
+    #[schemars(description = "Only rules on this USDT perpetual symbol")]
+    pub symbol: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -166,7 +200,7 @@ impl Watcher {
     }
 
     #[tool(
-        description = "Replace all price levels the desk cares about: thesis levels, and the sl, tp and liquidation prices of open trades (with trade_id). A cross, or first approach within 0.25 ATR, raises a level event; sl/tp/liquidation hits mean protect now."
+        description = "Replace ALL price levels (every group) with this list. Prefer put_levels/remove_levels, which change one group. A cross, or first approach within 0.25 ATR, raises a level event; sl/tp/liquidation hits mean protect now."
     )]
     async fn set_levels(
         &self,
@@ -178,7 +212,48 @@ impl Watcher {
     }
 
     #[tool(
-        description = "Create a market alert rule: typed conditions that must all hold (price_cross, move_z, volume_x, taker_imbalance, liq_burst, oi_change_z, funding_above). When it fires, an event carries the note and plan to the owner. action notify = heads-up, wake = run the watcher agent. Never opens trades. Returns the rule id or names the invalid field."
+        description = "Add and remove USDT perpetual symbols from the watched list without replacing it. Watched symbols get the built-in jump, liquidation and open-interest detector. Returns the full list."
+    )]
+    async fn update_interest(
+        &self,
+        Parameters(a): Parameters<UpdateInterestArgs>,
+    ) -> Result<Json<InterestResult>, String> {
+        ask(&self.ctl, |tx| Cmd::UpdateInterest(a.add, a.remove, tx))
+            .await?
+            .map(Json)
+    }
+
+    #[tool(
+        description = "Set one named group of price levels, e.g. key trade:<trade_id> with that trade's sl, tp and liquidation (each with trade_id and side). Other groups are untouched. A cross, or first approach within 0.25 ATR, raises a level event; sl/tp/liquidation crosses mean protect now."
+    )]
+    async fn put_levels(
+        &self,
+        Parameters(a): Parameters<PutLevelsArgs>,
+    ) -> Result<Json<LevelsResult>, String> {
+        ask(&self.ctl, |tx| Cmd::PutLevels(a.key, a.levels, tx))
+            .await?
+            .map(Json)
+    }
+
+    #[tool(description = "Remove one named group of price levels, e.g. when a trade closes.")]
+    async fn remove_levels(
+        &self,
+        Parameters(a): Parameters<RemoveLevelsArgs>,
+    ) -> Result<Json<RemovedResult>, String> {
+        ask(&self.ctl, |tx| Cmd::RemoveLevels(a.key, tx))
+            .await?
+            .map(|removed| Json(RemovedResult { removed }))
+    }
+
+    #[tool(
+        description = "Variables, functions and operators a `formula` rule condition can use, with what each variable means."
+    )]
+    async fn formula_catalog(&self) -> Result<Json<formula::Catalog>, String> {
+        Ok(Json(formula::catalog()))
+    }
+
+    #[tool(
+        description = "Create a market alert rule: conditions that must all hold - typed (price_cross, move_z, volume_x, taker_imbalance, liq_burst, oi_change_z, funding_above) or a free-form `formula` over the live metrics (see formula_catalog). When it fires, the event carries the note and plan back to the desk. action notify = heads-up, wake = ask the desk's agent to look now. Never opens trades. Returns the rule id or names the invalid field."
     )]
     async fn create_rule(
         &self,
@@ -190,14 +265,19 @@ impl Watcher {
     }
 
     #[tool(
-        description = "List an owner's active rules with their conditions and seconds left before they expire."
+        description = "List a user's active rules (optionally one agent's or one symbol's) with their conditions, owner and seconds left before they expire."
     )]
     async fn list_rules(
         &self,
         Parameters(a): Parameters<ListRulesArgs>,
     ) -> Result<Json<RulesList>, String> {
+        let f = RuleFilter {
+            user_id: a.user_id,
+            agent: a.agent,
+            symbol: a.symbol,
+        };
         Ok(Json(RulesList {
-            rules: ask(&self.ctl, |tx| Cmd::ListRules(a.owner, tx)).await?,
+            rules: ask(&self.ctl, |tx| Cmd::ListRules(f, tx)).await?,
         }))
     }
 

@@ -2,29 +2,38 @@
 
 A small Rust service that holds WebSocket connections to Binance USD-M futures, analyzes every trade in memory, and
 raises numbered events the moment something jumps. It is an MCP server: the sibling Python repo `../bg-agent-bot` (the
-paper-trading desk) controls it through tool calls and receives events through a long-poll tool. It exists because the
-desk's watcher agent only looks on `:00` and `:30`, so a volume surge at 9:10 is first seen at 9:30, after most of the
-move and with no time to decide on an entry. Target: surge at 9:10 -> flash alert at 9:10 -> watcher-agent
-recommendation (entry, SL, TP) within a minute.
+paper-trading desk) controls it through tool calls, and it calls the bot back over HTTP the moment an event fires. It
+exists because the desk's watcher agent only looks on `:00` and `:30`, so a volume surge at 9:10 is first seen at 9:30,
+after most of the move and with no time to decide on an entry. Target: surge at 9:10 -> callback at 9:10 -> the bot's
+supervisor agent investigates and answers in Discord within a minute.
 
-crabbian-watcher is the sensor. The Python "watcher agent" in bg-agent-bot is the judge. Never call this crate "the watcher".
+The agent is the brain: it decides what a big move is for each symbol (rules, including free-form formulas over the live
+metrics) and which symbols get the built-in detector. crabbian is the sensor that checks all of it every second, keeps it
+in Redis, and reports back. The judge is the bot's supervisor agent. Never call this crate "the watcher".
 
 ## Status
 
 The Rust service is built: Phase 0, the Phase A service side, tiers 0/1/2, and rules (Phase D service side). See
-`ARCHITECTURE.md` for the system as built and the decisions made during the build. Still open: the bot side in
-`../bg-agent-bot`, recorded fixtures, measured performance, and threshold tuning.
+`ARCHITECTURE.md` for the system as built and the decisions made during the build (it predates the Redis plan store, the
+HTTP callback, level groups and formulas - this file wins where they differ). Since then: Redis plan store, HTTP callback
+to the bot, level groups, formula conditions, noise filters moved here from the bot. Still open: recorded fixtures,
+measured performance, threshold tuning.
 
 ## Hard rules (do not break, do not ask to loosen)
 
-- **Memory only.** No database, no Redis, no file writes, no message broker. All state is lost on restart by design; the
-  bot is the source of truth and re-sends it (see "Restart behavior").
+- **Redis holds the agent's plans, nothing else.** `src/store.rs`: `crabbian:interest` (JSON list), `crabbian:levels` (hash
+  group key -> JSON levels), `crabbian:rules` (hash rule id -> spec + expiry). Restored at start, written by a separate
+  writer task (control never awaits Redis). Market state (bars, baselines, events) stays in memory. No database, no file
+  writes. `REDIS_URL` unset = memory only. The bot keeps no copy and never re-syncs.
 - **No LLM, no trading, no credentials.** Binance public market data only. No API keys, no order endpoints, ever.
 - **No budgets or caps on events.** The goal is speed to a decision. The first event for a symbol is never delayed or
   dropped. Cooldown and hysteresis only suppress repeats. Do not add per-hour/per-day wake limits, throttles that delay
   a first event, or "fuses" without the user asking. (Decided with the user; budgets were removed on purpose.)
-- **Thresholds are `const`s in `src/detector/consts.rs`, not config and not tool arguments.** Agents choose values
-  inside rules (price level, min volume multiple); they never choose detector logic or thresholds.
+- **Built-in detector thresholds are `const`s in `src/detector/consts.rs`, not config and not tool arguments.** The
+  agent's own logic goes into rules: typed conditions or a `formula` (`src/formula.rs`, `evalexpr`): a fixed variable list
+  and a function allowlist (no assignment, no strings/regex), validated at `create_rule`, compiled once per rule, one
+  context built per evaluation only when a rule has a formula, edge-triggered (must be false before it fires). New
+  variables = add them to `VARS` and `context()` with a test.
 - **Hot path stays cheap.** No allocation, no locks, no `.await` on slow I/O, no per-message heavy math. Heavy math runs
   once per second per symbol or once per closed 1m bar.
 - **The detector is pure.** `src/detector/` has no I/O, no clock reads (time is passed in), no tokio. Everything in it is
@@ -39,34 +48,36 @@ The Rust service is built: Phase 0, the Phase A service side, tiers 0/1/2, and r
 | Decision | Choice | Why |
 |---|---|---|
 | Transport | MCP, streamable HTTP | Agents control it, and the bot already speaks MCP to trade-ml |
-| Event delivery | `wait_events` long-poll with a cursor | Rare events, ms latency, no inbound port on the bot, replay for free, multiple consumers |
-| Not chosen | WebSocket between services, HTTP webhook, Redis stream, MCP notifications as the mechanism | Each adds protocol, retry or coupling and is no faster. Notifications may be added later as a wake-up hint only |
-| Rule storage | Memory here; durable copy in the bot's Redis with the rule's TTL | No migration, expires on its own, re-sent after restart |
+| Event delivery | HTTP callback (`src/callback.rs`): POST each event to `CRABBIAN_CALLBACK_URL`, body signed `x-crabbian-signature: sha256=<HMAC-SHA256(CRABBIAN_API_KEY, body)>`, sequential, retried with backoff up to 5 min (4xx = not retried) | The bot runs no pump or poller; it only reacts. `wait_events` stays for debugging |
+| Not chosen | Long-poll pump in the bot, Redis stream | Both kept a process busy on the bot's small VM |
+| Plan storage | Redis (`src/store.rs`), owned here | The bot had to rebuild and re-send state every minute; now the agent's plans persist where they run |
+| Level groups | `put_levels(key, levels)` / `remove_levels(key)`; the bot sends `trade:<id>` when a trade changes. `set_levels` replaces all groups | Incremental: one trade's levels, no full rebuild |
+| Noise filters | Here, not in the bot: `Event::weak` (tier 1, thesis-only: liq z < `WEAK_LIQ_Z`, level volume < `WEAK_LEVEL_VOL_X`) and thesis levels report once per `THESIS_REPEAT_MS` sliding window (`levels.rs`) | User asked (repeated BNB/XAU touches, low-z liquidation bursts) |
 | Alert levels | Tier 0 protect, Tier 1 heads up, Tier 2 please check | Matches how the desk already works |
-| Opening positions | Never here. The bot's watcher agent recommends; a watch that already has autopilot on can open through the bot's existing executor under its signed-off limits | The bot owns all trade logic and limits |
+| Opening positions | Never here. The bot's supervisor recommends on an event (its `open_position` refuses inside an event run); the user confirms | The bot owns all trade logic and limits |
 
 ## Architecture
 
 ```
- bg-agent-bot (Python)                              crabbian-watcher (Rust, this repo)
- ---------------------                              ----------------------------------
- crabbian_sync  --MCP set_interest / set_levels-->  1 Interest + levels + rules   (in memory)
- agent @tools   --MCP create_rule/list/cancel--->        |  drives WS SUBSCRIBE / UNSUBSCRIBE
- agent @tools   --MCP symbol_state------------->         v
-                                          Binance WS -> 2 Ingest -> shard tasks (own their symbols' state)
-                                          Binance REST -> OI poll (30s), kline backfill (start/reconnect)
-                                                         |
-                                                         v
-                                                    3 Detector (pure)   4 Level + rule matcher
-                                                         \_____________  ____________/
-                                                                       v
-                                                              5 Gate (cooldown, hysteresis) -> event ring (seq, epoch)
- crabbian_pump  <--MCP wait_events (long-poll)-------------------------'
-   -> Celery tasks over the bot's Redis: protect / flash alert / check_jump_event
+ bg-agent-bot (Python)                                   crabbian-watcher (Rust, this repo)
+ ---------------------                                   ----------------------------------
+ supervisor @tools --MCP create_rule/list/cancel------>  1 Interest + level groups + rules  <-> Redis (plans only)
+                   --MCP update_interest-------------->       |  drives WS SUBSCRIBE / UNSUBSCRIBE
+                   --MCP symbol_state / formula_catalog       v
+ TradeService      --MCP put_levels/remove_levels---->  Binance WS -> 2 Ingest -> shard tasks (own their symbols' state)
+                                                         Binance REST -> OI poll (30s), kline backfill (start/reconnect)
+                                                              |
+                                                              v
+                                                         3 Detector (pure)   4 Level + rule matcher (typed + formula)
+                                                              \_____________  ____________/
+                                                                            v
+                                                         5 Gate + noise filters -> event ring (seq, epoch)
+ POST /crabbian/events  <--HTTP callback, HMAC signed, retried--------------'
+   -> protect (code) -> heads-up in Discord -> tier 2 / wake rule: supervisor investigates and replies
 ```
 
-Two planes over one protocol: control (tool calls into this service) and events (`wait_events` out of it). They meet at
-the rule: every rule carries its owner and a note, so an event says whom to wake and why.
+Two planes: control (MCP tool calls into this service) and events (HTTP callback out of it). They meet at the rule:
+every rule carries its owner, a note and an optional plan, so an event says whom to wake and why.
 
 ### Tasks and ownership
 
@@ -129,7 +140,8 @@ confirmers) is a first guess; Phase A tunes it.
 
 ## Agent rules
 
-Typed data in a closed condition list. Never code, never a free-form expression language.
+Typed data in a closed condition list, plus one `formula` condition: a boolean expression the agent writes over a fixed set
+of live metrics (see `formula_catalog` and the hard rule above). Never code that can do I/O.
 
 ```json
 { "symbol": "SOLUSDT",
@@ -143,9 +155,10 @@ Typed data in a closed condition list. Never code, never a free-form expression 
 ```
 
 - Ids from the bot are UUID strings (`owner.user_id`, `trade_id`), not integers.
-- Conditions: `price_cross`, `move_z`, `volume_x`, `taker_imbalance`, `liq_burst`, `oi_change_z`, `funding_above`; combined
-  with `all` only. Adding a condition type means adding Rust code and a test, never a config entry.
-- `action`: `notify` (Tier 1 behavior) or `wake` (Tier 2). No action opens a trade.
+- Conditions: `price_cross`, `move_z`, `volume_x`, `taker_imbalance`, `liq_burst`, `oi_change_z`, `funding_above`,
+  `formula {expr, dir?}` (e.g. `math::abs(z_5m) >= 3.5 && vol_x_5m >= 2 && taker_buy_5m >= 0.65`); combined with `all` only.
+  Adding a typed condition means adding Rust code and a test, never a config entry.
+- `action`: `notify` (heads-up in Discord) or `wake` (Tier 2: the bot's supervisor investigates now). No action opens a trade.
 - `plan` is optional and passive: it travels in the event so the woken agent confirms a decision made earlier.
 - `ttl_s` default 86,400, maximum 604,800. Expired rules are dropped silently. A sanity bound of 1,000 rules total protects
   memory; per-user and per-symbol caps are enforced by the bot, not here.
@@ -159,16 +172,20 @@ LLM-facing and required.
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `set_interest` | `symbols: Vec<String>` (USDT perp symbols) | `{added, removed, unknown[]}`; diffs and sends SUBSCRIBE/UNSUBSCRIBE; refuses beyond the stream limit |
-| `set_levels` | `levels: Vec<Level>` where `Level {symbol, price, kind: thesis\|sl\|tp\|liquidation, side?, trade_id?}` | `{count}`; replaces all levels |
-| `create_rule` | a `Rule` (above) | `{rule_id}` or an error naming the invalid field |
-| `list_rules` | `owner: Owner` | that owner's active rules with seconds left |
+| `set_interest` | `symbols: Vec<String>` (USDT perp symbols) | `{added, removed, unknown[], interest[]}`; diffs and sends SUBSCRIBE/UNSUBSCRIBE; refuses beyond the stream limit |
+| `update_interest` | `add`, `remove` | same as `set_interest`, without replacing the list |
+| `set_levels` | `levels: Vec<Level>` where `Level {symbol, price, kind: thesis\|sl\|tp\|liquidation, side?, trade_id?}` | `{count, ignored}`; replaces ALL groups |
+| `put_levels` | `key` (e.g. `trade:<uuid>`), `levels` | `{count, ignored}`; replaces that group only; empty list removes it |
+| `remove_levels` | `key` | `{removed}` |
+| `create_rule` | a `Rule` (above) | `{rule_id, status}` or an error naming the invalid field |
+| `list_rules` | `user_id`, `agent?`, `symbol?` | the user's active rules with owner and seconds left |
+| `formula_catalog` | none | formula variables with meanings, functions, operators, notes |
 | `cancel_rule` | `rule_id`, `user_id` | `{cancelled}`; only the owning user |
 | `symbol_state` | `symbol` | `{sigma_1m, vol_x_5m, z_1m/5m/15m, taker_buy_share, funding, mark, oi_z, cooldown_until, warm}` |
 | `wait_events` | `after: u64`, `epoch: Option<String>`, `timeout_s: u32` (1..=25) | `{epoch, next, dropped, events[]}` |
 | `watcher_status` | none | feed age, symbols, msgs/sec, events today, epoch, rss (via `memory-stats`), warm-up state |
 
-**`wait_events` semantics (the contract the bot's pump depends on):**
+**`wait_events` semantics** (the callback sender reads the ring the same way; the bot no longer polls):
 - Returns immediately if any event has `seq > after`; otherwise waits on `Notify` up to `timeout_s`, then returns an empty
   list with the same `next`.
 - `epoch` is a random id generated at process start. If the caller's `epoch` differs (or is missing), return
@@ -213,8 +230,9 @@ required. Never `skip_serializing_if` a `Vec` on an output type.
 |---|---|
 | Binance socket drops | Reconnect with backoff 1s -> 30s, resubscribe the whole interest set, backfill the gap from REST klines. Gap > 60s = warm-up again |
 | No Binance message for 5s | Treat as dead, reconnect. `watcher_status` reports feed age; down > 60s is visible to the bot, which posts that fast protection is blind and relies on the 30-minute tick |
-| Process restarts | New `epoch`, empty rings refilled from REST klines, 30-minute warm-up. The bot's sync re-sends interest, levels and rules within 60s (immediately when the pump sees the epoch change) |
-| Bot or pump is down | Events wait in the ring. If more than 1,000 accumulate, the oldest drop and `dropped` reports it. The pump discards events older than 60s when it finally reads them |
+| Process restarts | New `epoch`, empty rings refilled from REST klines, 15-minute warm-up. Interest, level groups and unexpired rules are restored from Redis at start (expired ones are deleted); levels and price-only rules protect again immediately |
+| Redis down | Writes are retried with backoff in the writer task, in order; detection and callbacks continue. At start, an unreachable Redis is fatal (Docker restarts the service) |
+| Bot is down | The callback retries each event with backoff for 5 minutes, then drops it (logged); later events queue behind it in the ring (1,000 max, `dropped` logged). The bot only wakes its agent for events under 2 minutes old; protection runs regardless |
 | `set_interest` with an unknown symbol | Listed in `unknown`, the rest are applied |
 | Rule or level for a symbol not in the interest set | Accepted; the symbol is added to the subscription for the rule's lifetime |
 | Shard channel full | Drop the tick, count it in `watcher_status`; never block the socket reader |
@@ -245,7 +263,10 @@ Cargo.toml
 Dockerfile                      multi-stage; final image debian-slim or distroless
 src/
   main.rs                       wiring only: config, tracing, tasks, axum + rmcp server
-  config.rs                     env: CRABBIAN_API_KEY, CRABBIAN_BIND, BINANCE_WS_URL, LOG_LEVEL, LOG_PROCESS
+  config.rs                     env: CRABBIAN_API_KEY, CRABBIAN_BIND, BINANCE_WS_URL, LOG_LEVEL, LOG_PROCESS, REDIS_URL, CRABBIAN_CALLBACK_URL
+  store.rs                      Redis: load at start, writer task for interest / level groups / rules
+  callback.rs                   HMAC-signed POST of each event to the bot, retried
+  formula.rs                    agent formula: variables, allowlist, compile, context, eval
   mcp.rs                        tool structs, #[tool] handlers, auth middleware
   ingest.rs                     WebSocket connect/rotate/reconnect, SUBSCRIBE diffing, watchdog, frame parsing
   rest.rs                       klines, openInterest
@@ -303,16 +324,14 @@ Each phase ends in something verifiable. Do not start a phase before the previou
 
 - `app/core/crabbian_client.py`: same pattern as `app/core/mcp_client.py` (one session per process on its own event-loop
   thread, one retry after a stale session), settings `CRABBIAN_MCP_URL` and `CRABBIAN_API_KEY`.
-- `app/tasks/crabbian_sync.py`: Celery beat every 60s builds the interest set (watches + open trades + analyst coverage) and
-  levels (`AssetStrategy.key_levels`, open-trade SL/TP, `TradeService.liquidation_price`), plus every live rule from Redis, and
-  calls `set_interest`, `set_levels`, `create_rule`. Also called right after a watch or trade changes.
-- `app/tasks/crabbian_pump.py`: its own supervisord program. Loops on `wait_events`, tracks cursor and epoch, drops events
-  older than 60s, dedupes by `seq`, sends Celery tasks (protect, flash alert, `check_jump_event`).
-- `app/tools/crabbian_tools.py`: `set_market_alert`, `list_market_alerts`, `cancel_market_alert`, `live_market_state` as
-  `@tool`s that fill `owner` from `AgentContext`. Allowed for supervisor, watcher agent and analyst; not the quant agent.
-- Every Discord post still goes through `post_to_desk`, so the timeline records both the heads-up and the verdict.
-- The watcher agent still never opens trades. Autopilot, when a watch already has it on, runs through the bot's existing
-  `try_open_from_watch` with all its fixed limits.
+- No sync task, no pump, no event worker. `TradeService` sends `put_levels("trade:<id>")` / `remove_levels` when a trade
+  opens, changes or closes (background thread).
+- `app/tools/crabbian_tools.py`: `set_market_alert` (typed conditions + `formula`), `list_market_alerts`,
+  `cancel_market_alert`, `live_watchlist` (`update_interest`), `live_market_state`; `owner` filled from `AgentContext`.
+- `app/bot/crabbian_endpoint.py`: `POST /crabbian/events` on port 8090 in the bot process; checks the HMAC signature
+  (same `CRABBIAN_API_KEY`), dedupes by (epoch, seq, symbol), answers 202. `app/bot/market_events.py` then: protect in code,
+  heads-up via `post_to_desk`, and for tier 2 or a `wake` rule runs the SUPERVISOR on the user's thread, which replies in
+  Discord. The supervisor's `open_position` refuses inside an event run; the event never counts as the user's approval.
 
 ## Testing and workflow
 

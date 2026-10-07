@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::detector::Dir;
-use crate::detector::consts::{LEVEL_NEAR_ATR, LEVEL_REARM_ATR};
+use crate::detector::consts::{LEVEL_NEAR_ATR, LEVEL_REARM_ATR, THESIS_REPEAT_MS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +85,7 @@ pub struct LevelWatch {
     side: i8,
     cross_armed: bool,
     near_armed: bool,
+    last_touch_ms: Option<u64>,
 }
 
 impl LevelWatch {
@@ -94,7 +95,19 @@ impl LevelWatch {
             side: 0,
             cross_armed: true,
             near_armed: true,
+            last_touch_ms: None,
         }
+    }
+
+    fn report(&mut self, now_ms: u64) -> bool {
+        if self.level.kind != LevelKind::Thesis {
+            return true;
+        }
+        let quiet = self
+            .last_touch_ms
+            .is_some_and(|t| now_ms < t + THESIS_REPEAT_MS);
+        self.last_touch_ms = Some(now_ms);
+        !quiet
     }
 }
 
@@ -108,7 +121,7 @@ pub fn replace(old: &mut Vec<LevelWatch>, new: Vec<Level>) {
     }));
 }
 
-pub fn check(watches: &mut [LevelWatch], px: f64, atr: f64, out: &mut Vec<LevelHit>) {
+pub fn check(watches: &mut [LevelWatch], px: f64, atr: f64, now_ms: u64, out: &mut Vec<LevelHit>) {
     let band = LEVEL_NEAR_ATR * atr;
     for w in watches.iter_mut() {
         let lv = w.level.price;
@@ -122,11 +135,13 @@ pub fn check(watches: &mut [LevelWatch], px: f64, atr: f64, out: &mut Vec<LevelH
         if crossed {
             w.side = -w.side;
             if w.cross_armed {
-                out.push(hit(
-                    &w.level,
-                    Touch::Cross,
-                    if w.side > 0 { Dir::Up } else { Dir::Down },
-                ));
+                if w.report(now_ms) {
+                    out.push(hit(
+                        &w.level,
+                        Touch::Cross,
+                        if w.side > 0 { Dir::Up } else { Dir::Down },
+                    ));
+                }
                 w.cross_armed = false;
                 w.near_armed = false;
             }
@@ -134,11 +149,13 @@ pub fn check(watches: &mut [LevelWatch], px: f64, atr: f64, out: &mut Vec<LevelH
             w.cross_armed = true;
             w.near_armed = true;
         } else if d.abs() <= band && w.near_armed {
-            out.push(hit(
-                &w.level,
-                Touch::Near,
-                if d < 0.0 { Dir::Up } else { Dir::Down },
-            ));
+            if w.report(now_ms) {
+                out.push(hit(
+                    &w.level,
+                    Touch::Near,
+                    if d < 0.0 { Dir::Up } else { Dir::Down },
+                ));
+            }
             w.near_armed = false;
         }
     }
@@ -181,28 +198,62 @@ mod tests {
         let mut w = vec![LevelWatch::new(sl())];
         let mut out = Vec::new();
         for px in [110.0, 105.0, 100.4] {
-            check(&mut w, px, 2.0, &mut out);
+            check(&mut w, px, 2.0, 0, &mut out);
         }
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].touch, out[0].direction), (Touch::Near, Dir::Down));
-        check(&mut w, 99.9, 2.0, &mut out);
+        check(&mut w, 99.9, 2.0, 0, &mut out);
         assert_eq!((out[1].touch, out[1].direction), (Touch::Cross, Dir::Down));
         for px in [100.1, 99.9, 100.2, 99.8] {
-            check(&mut w, px, 2.0, &mut out);
+            check(&mut w, px, 2.0, 0, &mut out);
         }
         assert_eq!(out.len(), 2, "chatter around the level is suppressed");
-        check(&mut w, 98.0, 2.0, &mut out);
-        check(&mut w, 100.0, 2.0, &mut out);
+        check(&mut w, 98.0, 2.0, 0, &mut out);
+        check(&mut w, 100.0, 2.0, 0, &mut out);
         assert_eq!(out.len(), 3, "re-armed after moving 0.5 ATR away");
     }
 
     #[test]
     fn replace_keeps_state_for_same_level() {
         let mut w = vec![LevelWatch::new(sl())];
-        check(&mut w, 110.0, 2.0, &mut Vec::new());
+        check(&mut w, 110.0, 2.0, 0, &mut Vec::new());
         replace(&mut w, vec![sl()]);
         let mut out = Vec::new();
-        check(&mut w, 99.0, 2.0, &mut out);
+        check(&mut w, 99.0, 2.0, 0, &mut out);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn thesis_level_reports_once_until_price_stays_away_an_hour() {
+        let thesis = Level {
+            kind: LevelKind::Thesis,
+            side: None,
+            trade_id: None,
+            ..sl()
+        };
+        let mut w = vec![LevelWatch::new(thesis), LevelWatch::new(sl())];
+        let mut out = Vec::new();
+        let min = 60_000;
+        check(&mut w, 110.0, 2.0, 0, &mut out);
+        check(&mut w, 99.0, 2.0, min, &mut out);
+        assert_eq!(out.len(), 2, "first cross reports both levels");
+        check(&mut w, 97.0, 2.0, 2 * min, &mut out);
+        check(&mut w, 101.0, 2.0, 30 * min, &mut out);
+        assert_eq!(out.len(), 3, "repeat inside the hour: only the stop loss");
+        assert_eq!(out[2].kind, LevelKind::Sl);
+        check(&mut w, 104.0, 2.0, 31 * min, &mut out);
+        check(&mut w, 99.0, 2.0, 80 * min, &mut out);
+        assert_eq!(
+            out.len(),
+            4,
+            "the suppressed touch at 30 min restarted the hour"
+        );
+        check(&mut w, 97.0, 2.0, 81 * min, &mut out);
+        check(&mut w, 101.0, 2.0, 141 * min, &mut out);
+        assert_eq!(
+            out.len(),
+            6,
+            "an hour after the last touch the thesis level reports again"
+        );
     }
 }

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detector::consts::{COOLDOWN_MS, WINDOWS_S};
 use crate::detector::{Dir, Metrics};
+use crate::formula::{self, Ctx, Formula};
 use crate::levels::Side;
 
 pub const MAX_RULES: usize = 1_000;
@@ -65,13 +66,19 @@ pub enum Condition {
     OiChangeZ { min: f64, dir: Option<Dir> },
     #[schemars(description = "Current funding rate is above `rate` (e.g. 0.0005 = 0.05%)")]
     FundingAbove { rate: f64 },
+    #[schemars(
+        description = "Free-form boolean formula over the live metrics, e.g. `math::abs(z_5m) >= 3.5 && vol_x_5m >= 2 && taker_buy_5m >= 0.65`. Variables: price, mark, funding, sigma_1m, z_1m/z_5m/z_15m, move_1m/move_5m/move_15m (percent), vol_x_1m/vol_x_5m/vol_x_15m, taker_buy_1m/taker_buy_5m/taker_buy_15m (0-1), liq_usd, liq_long_usd, liq_short_usd, liq_x, oi_z, oi_chg. Functions: math::abs, min, max, floor, round, ceil, math::sqrt, math::ln, math::exp, math::pow, if. Fires when it becomes true; `dir` optionally names the direction of the move it describes"
+    )]
+    Formula { expr: String, dir: Option<Dir> },
 }
 
 impl Condition {
     fn needs_baselines(&self) -> bool {
         !matches!(
             self,
-            Condition::PriceCross { .. } | Condition::FundingAbove { .. }
+            Condition::PriceCross { .. }
+                | Condition::FundingAbove { .. }
+                | Condition::Formula { .. }
         )
     }
 }
@@ -86,7 +93,9 @@ impl When {
     pub fn direction(&self) -> Option<Dir> {
         self.all.iter().find_map(|c| match c {
             Condition::PriceCross { dir, .. } => Some(*dir),
-            Condition::MoveZ { dir, .. } | Condition::OiChangeZ { dir, .. } => *dir,
+            Condition::MoveZ { dir, .. }
+            | Condition::OiChangeZ { dir, .. }
+            | Condition::Formula { dir, .. } => *dir,
             Condition::TakerImbalance { side, .. } => Some(match side {
                 TakerSide::Buy => Dir::Up,
                 TakerSide::Sell => Dir::Down,
@@ -248,6 +257,9 @@ impl RuleSpec {
                         ));
                     }
                 }
+                Condition::Formula { expr, .. } => {
+                    formula::compile(expr).map_err(|e| bad(f("expr"), e))?;
+                }
             }
         }
         if self.note.trim().is_empty() || self.note.len() > 2_000 {
@@ -296,6 +308,7 @@ pub struct RuleEntry {
 pub struct RuleRt {
     pub entry: Arc<RuleEntry>,
     armed: Vec<bool>,
+    formulas: Arc<Vec<Option<Formula>>>,
     last_fired: Option<u64>,
     pub done: bool,
 }
@@ -303,12 +316,27 @@ pub struct RuleRt {
 impl RuleRt {
     pub fn new(entry: Arc<RuleEntry>) -> Self {
         let n = entry.spec.when.all.len();
+        let formulas = entry
+            .spec
+            .when
+            .all
+            .iter()
+            .map(|c| match c {
+                Condition::Formula { expr, .. } => formula::compile(expr).ok(),
+                _ => None,
+            })
+            .collect();
         Self {
             entry,
             armed: vec![false; n],
+            formulas: Arc::new(formulas),
             last_fired: None,
             done: false,
         }
+    }
+
+    pub fn has_formula(&self) -> bool {
+        self.formulas.iter().any(Option::is_some)
     }
 
     pub fn replace(old: &mut Vec<RuleRt>, new: Vec<Arc<RuleEntry>>) {
@@ -332,7 +360,7 @@ impl RuleRt {
         })
     }
 
-    pub fn eval(&mut self, m: &Metrics) -> bool {
+    pub fn eval(&mut self, m: &Metrics, ctx: Option<&Ctx>) -> bool {
         if self.done || m.now_ms >= self.entry.expires_ms {
             return false;
         }
@@ -377,6 +405,16 @@ impl RuleRt {
                         .oi_z
                         .is_some_and(|z| z.abs() >= *min && dir.is_none_or(|d| Dir::of(z) == d)),
                     Condition::FundingAbove { rate } => m.funding > *rate,
+                    Condition::Formula { .. } => {
+                        let now = match (&self.formulas[i], ctx) {
+                            (Some(f), Some(ctx)) => formula::holds(f, ctx),
+                            _ => false,
+                        };
+                        if !now {
+                            self.armed[i] = true;
+                        }
+                        self.armed[i] && now
+                    }
                 }
             };
             all &= ok;
@@ -392,7 +430,7 @@ impl RuleRt {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub fn spec() -> RuleSpec {
@@ -470,11 +508,53 @@ mod tests {
             warm: true,
             ..Default::default()
         };
-        assert!(!r.eval(&m(151.0, 0)), "already above at creation");
-        assert!(!r.eval(&m(149.0, 1)));
-        assert!(r.eval(&m(150.5, 2)));
-        assert!(!r.eval(&m(149.0, 3)));
-        assert!(!r.eval(&m(151.0, COOLDOWN_MS * 2)));
+        assert!(!r.eval(&m(151.0, 0), None), "already above at creation");
+        assert!(!r.eval(&m(149.0, 1), None));
+        assert!(r.eval(&m(150.5, 2), None));
+        assert!(!r.eval(&m(149.0, 3), None));
+        assert!(!r.eval(&m(151.0, COOLDOWN_MS * 2), None));
         assert!(r.done);
+    }
+
+    #[test]
+    fn a_formula_rule_fires_when_it_becomes_true_and_bad_ones_name_the_field() {
+        let mut s = spec();
+        s.plan = None;
+        s.once = Some(false);
+        s.when.all = vec![Condition::Formula {
+            expr: "price >= 150 && funding < 0.001".into(),
+            dir: Some(Dir::Up),
+        }];
+        assert!(s.validate(|_| true).is_ok());
+        assert_eq!(s.when.direction(), Some(Dir::Up));
+        let mut r = RuleRt::new(Arc::new(RuleEntry {
+            id: "r_2".into(),
+            spec: s.clone(),
+            expires_ms: u64::MAX,
+        }));
+        assert!(r.has_formula());
+        let m = |price, now_ms| Metrics {
+            price,
+            now_ms,
+            warm: true,
+            ..Default::default()
+        };
+        let mut eval = |price, now_ms| {
+            let mm = m(price, now_ms);
+            r.eval(&mm, Some(&formula::context(&mm)))
+        };
+        assert!(!eval(151.0, 0), "already true at creation");
+        assert!(!eval(149.0, 1));
+        assert!(eval(150.5, 2));
+        assert!(!eval(149.0, 3));
+        assert!(!eval(151.0, 4), "inside the cooldown");
+        assert!(!eval(149.0, COOLDOWN_MS + 5));
+        assert!(eval(151.0, COOLDOWN_MS + 6));
+
+        s.when.all = vec![Condition::Formula {
+            expr: "rsi > 70".into(),
+            dir: None,
+        }];
+        assert_eq!(s.validate(|_| true).unwrap_err().field, "when.all[0].expr");
     }
 }

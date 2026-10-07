@@ -36,6 +36,9 @@ pub const ATR_BARS: usize = 120;
 pub const ATR_FLOOR_FRAC: f64 = 1e-4;
 pub const LEVEL_NEAR_ATR: f64 = 0.25;
 pub const LEVEL_REARM_ATR: f64 = 0.5;
+pub const THESIS_REPEAT_MS: u64 = 60 * MIN_MS;
+pub const WEAK_LIQ_Z: f64 = 3.0;
+pub const WEAK_LEVEL_VOL_X: f64 = 1.0;
 
 pub const COOLDOWN_MS: u64 = 15 * MIN_MS;
 pub const REARM_Z: f64 = 1.5;

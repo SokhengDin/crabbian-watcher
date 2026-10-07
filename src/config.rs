@@ -7,6 +7,8 @@ pub struct Config {
     pub binance_ws_url: String,
     pub log_level: String,
     pub log_process: String,
+    pub redis_url: Option<String>,
+    pub callback_url: Option<String>,
 }
 
 impl Config {
@@ -19,6 +21,10 @@ impl Config {
             binance_ws_url: var("BINANCE_WS_URL", "wss://fstream.binance.com/market/stream"),
             log_level: var("LOG_LEVEL", "info"),
             log_process: var("LOG_PROCESS", "crabbian"),
+            redis_url: env::var("REDIS_URL").ok().filter(|u| !u.trim().is_empty()),
+            callback_url: env::var("CRABBIAN_CALLBACK_URL")
+                .ok()
+                .filter(|u| !u.trim().is_empty()),
         }
     }
 }

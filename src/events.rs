@@ -7,8 +7,9 @@ use serde::Serialize;
 use tokio::sync::Notify;
 
 use crate::detector::Dir;
+use crate::detector::consts::{WEAK_LEVEL_VOL_X, WEAK_LIQ_Z};
 use crate::detector::signals::{Confirmer, OiRead};
-use crate::levels::LevelHit;
+use crate::levels::{LevelHit, LevelKind};
 use crate::rules::{Action, Owner, Plan};
 
 pub const RING_CAP: usize = 1_000;
@@ -84,6 +85,30 @@ pub struct Event {
     pub levels_hit: Vec<LevelHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<RuleRef>,
+}
+
+impl Event {
+    pub fn weak(&self) -> bool {
+        if self.tier >= 2
+            || self.rule.is_some()
+            || self.levels_hit.iter().any(|h| h.kind != LevelKind::Thesis)
+        {
+            return false;
+        }
+        let s = &self.signals;
+        match self.kind {
+            EventKind::Liq => {
+                let z = match s.window_s {
+                    Some(60) => s.z1,
+                    Some(900) => s.z15,
+                    _ => s.z5,
+                };
+                z.is_some_and(|z| z.abs() < WEAK_LIQ_Z)
+            }
+            EventKind::Level => s.vol_x.is_some_and(|v| v < WEAK_LEVEL_VOL_X),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
