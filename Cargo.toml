@@ -27,7 +27,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 binance-sdk = { version = "73.0.0", features = ["spot", "derivatives_trading_usds_futures"] }
 dotenvy = "0.15"
 redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager"] }
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
